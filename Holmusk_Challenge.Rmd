@@ -1,0 +1,466 @@
+---
+title: "Holmusk_Challenge"
+output: html_document
+date: "2023-06-02"
+---
+### Load data ###
+```{r}
+bill_amt = read.csv("bill_amount.csv")
+bill_id = read.csv("bill_id.csv")
+clinical = read.csv("clinical_data.csv")
+demo = read.csv("demographics.csv")
+```
+
+
+### Clean data ### 
+```{r}
+library(dplyr)
+```
+
+1. Data frame: bill_amt
+```{r}
+str(bill_amt)
+colSums(is.na(bill_amt)) 
+```
+
+2. Data frame: bill_id 
+```{r}
+str(bill_id)
+bill_id$date_of_admission = as.Date(bill_id$date_of_admission, format = "%Y-%m-%d") 
+colSums(is.na(bill_id)) 
+```
+
+3. Data frame: clinical
+```{r}
+str(clinical)
+
+colSums(is.na(clinical))  
+
+# date_of_admission, date_of_discharge 
+clinical$date_of_admission = as.Date(clinical$date_of_admission, format = "%Y-%m-%d") 
+clinical$date_of_discharge = as.Date(clinical$date_of_discharge, format = "%Y-%m-%d")
+```
+
+```{r}
+# medical_history_1
+table(clinical$medical_history_1)
+clinical$medical_history_1 = as.factor(clinical$medical_history_1)
+summary(clinical$medical_history_1)
+
+# medical_history_2 - 233 NA  
+table(clinical$medical_history_2)
+clinical$medical_history_2 = as.factor(clinical$medical_history_2)
+str(clinical$medical_history_2)
+ 
+# medical_history_3
+table(clinical$medical_history_3)
+clinical["medical_history_3"][clinical["medical_history_3"] == "No"] = "0"
+clinical["medical_history_3"][clinical["medical_history_3"] == "Yes"] = "1"
+clinical$medical_history_3 = as.factor(clinical$medical_history_3)
+str(clinical$medical_history_3)
+
+# medical_history_4, 5, 6, 7
+# medical_history_5 - 304 NA  
+clinical[7:10] = lapply(clinical[7:10], as.factor)
+str(clinical)
+```
+
+```{r}
+# preop_medication_1 to 6 
+clinical[11:16] = lapply(clinical[11:16], as.factor)
+```
+
+```{r}
+# symptom_1 to 5
+clinical[17:21] = lapply(clinical[17:21], as.factor)
+```
+
+```{r}
+# rename patient id col in clinical 
+clinical = rename(clinical, patient_id = "id") 
+```
+
+4. Data frame: demo
+```{r}
+str(demo)
+
+table(demo$gender) 
+demo["gender"][demo["gender"] == "f"] = "Female"
+demo["gender"][demo["gender"] == "m"] = "Male"
+
+table(demo$race)
+demo["race"][demo["race"] == "chinese"] = "Chinese"
+demo["race"][demo["race"] == "India"] = "Indian"  
+
+table(demo$resident_status)
+demo["resident_status"][demo["resident_status"] == "Singapore citizen"] = "Singaporean"
+
+demo[2:4] = lapply(demo[2:4], as.factor)
+
+demo$date_of_birth = as.Date(demo$date_of_birth, format = "%Y-%m-%d")   
+
+colSums(is.na(demo))
+``` 
+
+
+### Handle repeats & duplicates ###
+```{r}
+# check for duplicated rows  
+sum(duplicated(bill_amt))
+sum(duplicated(bill_id))
+sum(duplicated(clinical))
+sum(duplicated(demo))   
+```  
+There are no duplicated rows. 
+
+```{r}
+bill_combined = inner_join(bill_id, bill_amt, by = "bill_id")  
+```
+
+Check for split payments on the same occasion  
+```{r}   
+df1 = bill_combined %>%
+  add_count(patient_id, date_of_admission) %>%
+  filter(n>1) %>%
+  distinct() 
+```
+Each payment is split into 4 bills  
+
+  
+Combine 4 bills into one for each patient on each occasion
+```{r}
+df2 = bill_combined %>% 
+  group_by(patient_id, date_of_admission) %>%
+  summarise_at(vars(amount), funs(sum)) %>% 
+  ungroup()
+
+bill_final = df2 %>% rename(total_bill = "amount")
+```
+
+Next, find out how many patients have repeated admissions & find number of unique patients.  
+```{r}
+bill_final %>% distinct(patient_id)
+clinical %>% distinct(patient_id) 
+demo %>% distinct(patient_id)
+```
+Number of unique patients is 3,000
+
+```{r}
+num_admissions = bill_final %>%
+  add_count(patient_id)
+```
+
+```{r}
+num_admissions = num_admissions %>% rename(total_num_admissions = n)
+```
+
+```{r}
+num_admissions %>% filter(total_num_admissions==4)
+num_admissions %>% filter(total_num_admissions==3)
+num_admissions %>% filter(total_num_admissions==2)
+num_admissions %>% filter(total_num_admissions==1)
+```
+4 admits: 1 patient
+3 admits: 57/3 = 19 patients
+2 admits: 718/2 = 359 patients
+1 admit: 2,621 patients  
+
+
+### Join data frames ###  
+```{r}
+final_df = full_join(num_admissions, clinical, by = c("patient_id", "date_of_admission"))  
+final_df = left_join(final_df, demo, by = "patient_id") 
+```    
+
+
+### Feature engineering ###
+```{r}
+# length of stay
+final_df = mutate(final_df, len_stay = date_of_discharge - date_of_admission)
+final_df$len_stay = as.numeric(final_df$len_stay) 
+
+# BMI
+final_df = mutate(final_df, BMI = weight/((height/100)^2))  
+
+# age upon admission
+final_df = mutate(final_df, admission_age = date_of_admission - date_of_birth) 
+final_df$admission_age = as.numeric(final_df$admission_age)
+final_df = mutate(final_df, admission_age = admission_age/365)
+```
+
+```{r}
+# nth admission 
+final_df = arrange(final_df, desc(total_num_admissions), patient_id, date_of_admission) 
+filter(final_df, total_num_admissions != 1) #779 rows
+
+final_df[, "nth_admission"] = 1
+
+for (i in 2:779) {  
+  if (final_df[i,1] == final_df[i-1,1]) { # same patient
+  final_df[i,36] = final_df[i-1, 36] + 1   
+  }
+}  
+
+View(final_df %>% select(patient_id, date_of_admission, nth_admission, total_num_admissions)) 
+```
+
+
+### Handle NA values ### 
+Show rows with NA values 
+```{r}
+NA_vals = final_df[!complete.cases(final_df), ]
+summary(NA_vals)
+```
+502 rows  
+ 
+```{r}
+summary(final_df) 
+```
+
+Based on a visual analysis of the summary statistics of the full dataset & the subset containing only NA values, they share very similar means, medians, and proportions. Based on this, I will impute missing values in medical_history_2 and medical_history_5 with the mode of each variable. 
+This is because the subset of rows containing NA values seem to be a random sample of the entire subset i.e. missing completely at random, rather than missing not at random or missing at random. 
+
+Limitations further discussed later.       
+
+Impute missing data 
+```{r}
+# medical_history_2 - mode = 0 
+# medical_history_5 - mode = 0 
+final_df[is.na(final_df)] = as.factor(0)
+summary(final_df)  
+str(final_df) 
+```
+
+```{r}
+boxplot(final_df$lab_result_1)
+boxplot(final_df$lab_result_2)
+boxplot(final_df$lab_result_3)
+```
+
+
+### Analysis of cost drivers ###  
+
+1. Correlation
+```{r}
+df_cor = select(final_df, total_bill, total_num_admissions, lab_result_1, lab_result_2, lab_result_3, weight, height, len_stay, BMI, admission_age, nth_admission)  
+```
+
+```{r}
+cor(df_cor)
+```
+The correlation analysis does not seem to produce any valuable insight. Attempt other methods instead. 
+
+2. Feature importance  
+```{r}
+df_wo_id = select(final_df, -patient_id)
+```
+
+```{r}
+library(randomForest)
+library(caret)
+library(varImp)
+```
+
+Random forest
+```{r}
+rf_model = randomForest(total_bill ~ ., data = df_wo_id, importance = TRUE)
+```
+
+```{r}
+varImpPlot(rf_model) 
+``` 
+ 
+Top 3 variables: symptom 5, resident status, race  
+
+
+### Visualisation ###
+```{r}
+library(ggplot2)
+```
+
+1. symptom_5 
+```{r}
+View(final_df %>% select(total_bill, symptom_5))
+```
+
+```{r}
+tapply(final_df$total_bill, final_df$symptom_5, mean) 
+```
+```{r}
+tapply(final_df$total_bill, final_df$symptom_5, median) 
+```
+Patients with symptom 5 have higher mean and median bills. 
+
+```{r}
+quantile(final_df$total_bill, prob = seq(0,1,0.1))
+```
+
+```{r}
+# 0 to <10
+table(final_df$symptom_5[final_df$total_bill < 11112.73])
+
+# 10 to <20
+table(final_df$symptom_5[final_df$total_bill >= 11112.73 & final_df$total_bill < 13577.63]) 
+
+# 20 to <30
+table(final_df$symptom_5[final_df$total_bill >= 13577.63 & final_df$total_bill < 15919.81]) 
+
+# 30 to <40
+table(final_df$symptom_5[final_df$total_bill >= 15919.81 & final_df$total_bill < 18047.39]) 
+
+# 40 to <50
+table(final_df$symptom_5[final_df$total_bill >= 18047.39 & final_df$total_bill < 20180.02]) 
+
+# 50 to <60
+table(final_df$symptom_5[final_df$total_bill >= 20180.02 & final_df$total_bill < 22598.71]) 
+
+# 60 to <70
+table(final_df$symptom_5[final_df$total_bill >= 22598.71 & final_df$total_bill < 25172.88])
+
+# 70 to <80
+table(final_df$symptom_5[final_df$total_bill >= 25172.88 & final_df$total_bill < 28384.32])
+
+# 80 to <90
+table(final_df$symptom_5[final_df$total_bill >= 34207.79 & final_df$total_bill < 98723.85]) 
+
+```
+
+```{r}
+prop_s5 = c(4/340,
+           31/340,
+           82/340,
+           141/340,
+           195/340,
+           221/340,
+           248/340,
+           268/340,
+           297/340,
+           303/339) 
+quantile_bill = seq(0.1,1,0.1)
+```
+
+```{r}
+ggplot(data = NULL, aes(x=quantile_bill, y=prop_s5)) +
+  geom_point() +
+  geom_line() +
+  labs(title="Correlation between display of symptom 5 & total bill", x="Total bill (by quantile)", y="Proportion of patients with symptom 5") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+2. Resident status
+```{r}
+table(final_df$resident_status)
+```
+
+```{r}
+tapply(final_df$total_bill, final_df$resident_status, mean)
+```
+
+```{r}
+tapply(final_df$total_bill, final_df$resident_status, median) 
+```
+
+
+```{r}
+ggplot(data = final_df, aes(x = resident_status, y = total_bill)) +
+  geom_boxplot() +
+  labs(x = "Resident Status", y = "Total Bill")
+```
+3. Race
+```{r}
+table(final_df$race)
+```
+
+```{r}
+tapply(final_df$total_bill, final_df$race, mean)
+```
+
+```{r}
+tapply(final_df$total_bill, final_df$race, median) 
+```
+
+
+```{r}
+ggplot(data = final_df, aes(x = race, y = total_bill)) +
+  geom_boxplot() +
+  labs(x = "Race", y = "Total Bill")
+```
+Further analysis on Race - find other possible causes of discrepancies in bill for Malay & Indian races 
+```{r}
+ggplot(data = final_df, aes(x = race, y = len_stay)) +
+  geom_boxplot() +
+  labs(x = "Race", y = "Length of Stay")
+```
+```{r}
+ggplot(data = final_df, aes(x = race, y = admission_age)) +
+  geom_boxplot() +
+  labs(x = "Race", y = "Age")
+``` 
+```{r}
+rf_model_race = randomForest(race ~ ., data = df_wo_id, importance = TRUE)
+```
+
+```{r}
+varImpPlot(rf_model_race) 
+``` 
+
+4. Symptom 5 to race 
+```{r}
+table(final_df$symptom_5, final_df$race) 
+```
+For each race, not significantly imbalanced between 0 and 1.
+
+5. Race to resident status
+```{r}
+table(final_df$resident_status, final_df$race) 
+```
+Find percentage of Foreigners in each race 
+```{r}
+f = c(106,     14,    31,     10)
+pr = c(338,     43,   109,     25)
+sg = c(1722,    287,   567,    148)
+proportion = f/(f+pr+sg)
+proportion
+```
+
+Similar proportion of Foreigners across races.
+
+
+### Analysis ###
+1. Biological differences
+Some races could have higher predisposition to other symptoms not captured in this data set.
+Other conditions that are related to this particular condition, making treatment more complicated and costly.
+
+2. Cultural differences
+Cultural factors that pertain to healthcare services & needs, e.g. differences in health-seeking behaviours, accessing appropriate healthcare services & treatment plans, and disparities in health insurance coverage. 
+
+
+### Recommendations ###
+1. Resource & manpower allocation
+Deploy appropriate healthcare professionals who can bridge cultural gaps and contextualise treatment plans to better fit patients’ needs.
+Involves greater levels of personalisation, which can be automated through the use of AI technologies and EMR.
+  
+2. Collaboration with community resources and networks
+Improve care continuity, especially for chronic conditions. 
+Increase access to appropriate resources (e.g. differing needs across races/ conditions) and improve health-seeking behaviours
+Reduce the effects of peripheral/ related symptoms and prevent them from becoming debilitative or severe.
+
+3. Alternative cost-effective treatment plans
+Empathise with differing financial circumstances based on resident status, medical insurance coverage, income levels, etc. 
+Make cheaper alternatives available while explaining similarities and differences in alterative treatment plans, should patients want to opt in. 
+
+
+### Limitations ###
+1. Handling NA values
+Further statistical tests can be performed to determine the missing data mechanism (MCAR/ MAR/ MNAR). 
+Use of mode to impute values: 
+
+medical_history_5: high proportion of entries (94%) are 0, hence it seems relatively reasonable to impute NAs as 0 
+medical_history_2: this is more problematic because there is actually a higher proportion (29%) of 1s
+
+Ultimately, domain knowledge + more information is required.  For example, it might be possible to infer or make better assumptions on missing data based on patients' medical history for related variables. 
+ 
+2. Feature engineering
+Length from last discharge: back to back admissions (e.g. within 90 days) could be an indication of something more serious, and might therefore drive costs up. 
+However, for this data set, only 23% of entries are repeat admissions, hence it did not seem very useful. Furthermore, based on feature importance, the total number of admissions and repeated admissions did not play a significant importance in determining costs. 
+
+3. Consider runner up variables in the feature importance plot
